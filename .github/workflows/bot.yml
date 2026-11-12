@@ -1,0 +1,97 @@
+name: 24-7 Telegram Bot Runner (Relay Runner)
+
+on:
+  schedule:
+    # Backup trigger every 4 hours in case relay dispatch is delayed
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'data/**'
+      - '*.md'
+      - 'deploy.sh'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+
+concurrency:
+  group: telegram-bot-runner
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300 # 5 hours max safety margin
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Persistent Database State
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          # Decrypts and restores database from tracked data/database_state.enc
+          python -m bot.db.state_sync restore || true
+          python -m bot.db.sync_plans || true
+
+      - name: Run Zak Univers Bot (Relay Shift)
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_IDS_RAW: ${{ secrets.OWNER_IDS_RAW }}
+          PANEL_URL: ${{ secrets.PANEL_URL }}
+          PANEL_API_KEY: ${{ secrets.PANEL_API_KEY }}
+          PANEL_USERNAME: ${{ secrets.PANEL_USERNAME }}
+          PANEL_PASSWORD: ${{ secrets.PANEL_PASSWORD }}
+          DATABASE_URL: "sqlite+aiosqlite:///./bot.db"
+          MANDATORY_CHANNELS_RAW: ${{ secrets.MANDATORY_CHANNELS_RAW }}
+          ORDER_EXPIRY_MINUTES: 30
+          LOG_LEVEL: INFO
+          MAX_RUN_SECONDS: 14700 # ~4 hours and 5 minutes
+        run: |
+          python -m bot.main
+
+      - name: Auto-Save Database State to GitHub
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          # Encrypt and export latest state from SQLite to AES-256 state file
+          python -m bot.db.state_sync export || true
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull origin main --rebase || true
+          
+          if [ -f "data/database_state.enc" ]; then
+            git add data/database_state.enc
+            git commit -m "chore: auto-save encrypted database state [skip ci]" || echo "No changes to commit"
+            git push origin main || echo "Push skipped"
+          fi
+
+      - name: Trigger Next Relay Runner (Zero Downtime)
+        if: always()
+        run: |
+          echo "Dispatching next relay runner..."
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches \
+            -d '{"ref":"main"}' || echo "Self-relay dispatched"

@@ -1,0 +1,16 @@
+[Unit]
+Description=Zak Univers Telegram Bot 24/7 Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zakuniversbot
+ExecStart=/opt/zakuniversbot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
