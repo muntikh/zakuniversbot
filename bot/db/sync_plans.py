@@ -14,7 +14,7 @@ from bot.services.pasarguard import panel
 # Unlimited plans: special fixed price
 
 def estimate_price(data_gb: float, duration_days: int) -> int:
-    """Calculates price strictly at 4,000 Tomans per GB, with fixed pricing for Unlimited."""
+    """Calculates price with updated tariffs: 4,800 T per GB for 1-6 months, 4,000 T per GB for 1-year."""
     if data_gb == 0:  # Unlimited traffic
         if duration_days <= 30:
             return 350000
@@ -22,8 +22,16 @@ def estimate_price(data_gb: float, duration_days: int) -> int:
             return 850000
         return 1500000
 
-    # Base pricing: 4,000 Tomans per GB
-    return max(20000, int(data_gb * 4000))
+    # 1-year stays untouched at 4,000 T/GB
+    if duration_days >= 365:
+        return max(20000, int(data_gb * 4000))
+
+    # 1-month 50 GB is strictly 240,000 T
+    if data_gb == 50 and duration_days <= 30:
+        return 240000
+
+    # Other multi-month plans scaled like month 1 (4,800 T/GB)
+    return max(20000, int(data_gb * 4800))
 
 
 async def sync():
@@ -62,7 +70,17 @@ async def sync():
 
             price = estimate_price(data_gb, duration_days)
 
-            is_visible = (duration_days >= 30)
+            # Filter low volumes: remove 1-month 20GB and lowest multi-month options
+            if duration_days <= 30 and data_gb <= 20:
+                is_visible = False
+            elif 30 < duration_days <= 60 and data_gb <= 30:
+                is_visible = False
+            elif 60 < duration_days <= 90 and data_gb <= 40:
+                is_visible = False
+            elif 90 < duration_days <= 180 and data_gb <= 80:
+                is_visible = False
+            else:
+                is_visible = (duration_days >= 30)
 
             # Check if plan already exists for this template
             result = await session.execute(

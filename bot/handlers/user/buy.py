@@ -61,33 +61,30 @@ PLANS_CATALOG: dict[int, dict[str, Any]] = {
     30: {
         "title": "۱ ماهه (۳۰ روز)",
         "options": [
-            {"gb": 20, "base_price": 80000, "template_id": 3},
-            {"gb": 50, "base_price": 200000, "template_id": 5},
-            {"gb": 80, "base_price": 320000, "template_id": 14},
+            {"gb": 50, "base_price": 240000, "template_id": 5},
+            {"gb": 80, "base_price": 380000, "template_id": 14},
+            {"gb": 100, "base_price": 480000, "template_id": 15},
         ],
     },
     60: {
         "title": "۲ ماهه (۶۰ روز)",
         "options": [
-            {"gb": 30, "base_price": 120000, "template_id": 4},
-            {"gb": 60, "base_price": 240000, "template_id": 13},
-            {"gb": 90, "base_price": 360000, "template_id": 15},
+            {"gb": 60, "base_price": 290000, "template_id": 13},
+            {"gb": 90, "base_price": 430000, "template_id": 15},
         ],
     },
     90: {
         "title": "۳ ماهه (۹۰ روز)",
         "options": [
-            {"gb": 40, "base_price": 160000, "template_id": 12},
-            {"gb": 70, "base_price": 280000, "template_id": 20},
-            {"gb": 100, "base_price": 400000, "template_id": 21},
+            {"gb": 70, "base_price": 340000, "template_id": 20},
+            {"gb": 100, "base_price": 480000, "template_id": 21},
         ],
     },
     180: {
         "title": "۶ ماهه (۱۸۰ روز)",
         "options": [
-            {"gb": 80, "base_price": 320000, "template_id": 22},
-            {"gb": 150, "base_price": 600000, "template_id": 23},
-            {"gb": 200, "base_price": 800000, "template_id": 23},
+            {"gb": 150, "base_price": 720000, "template_id": 23},
+            {"gb": 200, "base_price": 960000, "template_id": 23},
         ],
     },
     365: {
