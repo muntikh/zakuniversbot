@@ -49,9 +49,11 @@ class AdminSupportReplyStates(StatesGroup):
 
 
 class AdminBroadcastStates(StatesGroup):
-    choosing_target = State()     # انتخاب مخاطبان
-    writing_message = State()     # نوشتن متن
-    confirming = State()          # تایید نهایی
+    choosing_target = State()        # انتخاب مخاطبان هدف (همه، مشترکین، عادی)
+    waiting_message = State()        # دریافت پیام همگانی (هر نوع مدیا یا متن)
+    choosing_button_option = State() # تصمیم برای داشتن دکمه شیشه‌ای
+    entering_buttons = State()       # ارسال ساختار دکمه‌های شیشه‌ای
+    confirming_broadcast = State()   # پیش‌نمایش و تایید نهایی ارسال
 
 
 class AdminUserSearchStates(StatesGroup):
