@@ -92,11 +92,45 @@ def main_menu_inline_kb(is_admin: bool = False, user_id: int | None = None) -> I
 # ─────────────────────────────────────────────────────────────
 
 def single_mode_kb() -> InlineKeyboardMarkup:
-    """Shows single button: 'فیلتر نت ملی' (no flag, no 'وضعیت ضد')."""
+    """Shows buttons: 'نت ملی' and 'منوی اصلی 🔙' matching Image 1."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="فیلتر نت ملی", callback_data="mode:national")],
-        [InlineKeyboardButton(text="🔙 بازگشت به منوی اصلی", callback_data="buy:cancel")],
+        [InlineKeyboardButton(text="نت ملی", callback_data="buy:loc:national")],
+        [InlineKeyboardButton(text="منوی اصلی 🔙", callback_data="buy:cancel")],
     ])
+
+mode_kb = single_mode_kb
+
+
+def os_selection_kb() -> InlineKeyboardMarkup:
+    """Matches Image 2: OS selection."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="آیفون (Ios)", callback_data="buy:os:ios"),
+            InlineKeyboardButton(text="اندروید", callback_data="buy:os:android"),
+        ],
+        [
+            InlineKeyboardButton(text="بازگشت 🔙", callback_data="buy:back_to_loc"),
+        ],
+    ])
+
+
+def os_plans_kb(os_name: str) -> InlineKeyboardMarkup:
+    """Matches Image 3 (iOS) & Image 4 (Android)."""
+    rows = []
+    if os_name == "android":
+        # Android: 3 plans matching Image 4
+        rows.append([InlineKeyboardButton(text="1 ماه | 50 گیگ | 259ت", callback_data="buy:plan:android_50gb_1m")])
+        rows.append([InlineKeyboardButton(text="2 ماه | 90 گیگ | 385ت", callback_data="buy:plan:android_90gb_2m")])
+        rows.append([InlineKeyboardButton(text="3 ماه | 150 گیگ | 420ت", callback_data="buy:plan:android_150gb_3m")])
+    else:
+        # iOS: 4 plans matching Image 3
+        rows.append([InlineKeyboardButton(text="1 ماه | 50 گیگ | 319ت", callback_data="buy:plan:ios_50gb_1m")])
+        rows.append([InlineKeyboardButton(text="2 ماه | 90 گیگ | 435ت", callback_data="buy:plan:ios_90gb_2m")])
+        rows.append([InlineKeyboardButton(text="3 ماه | 150 گیگ | 500ت", callback_data="buy:plan:ios_150gb_3m")])
+        rows.append([InlineKeyboardButton(text="نامحدود | 6 ماه | 3 کاربر", callback_data="buy:plan:ios_unlimited_6m_3u")])
+
+    rows.append([InlineKeyboardButton(text="بازگشت 🔙", callback_data="buy:back_to_os")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def durations_catalog_kb() -> InlineKeyboardMarkup:
@@ -157,7 +191,7 @@ def config_name_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 تولید نام تصادفی", callback_data="cfg_name:random")],
         [
-            InlineKeyboardButton(text="🔙 مرحله قبل", callback_data="buy:back_to_tiers"),
+            InlineKeyboardButton(text="🔙 مرحله قبل", callback_data="buy:back_to_plans"),
             InlineKeyboardButton(text="❌ انصراف", callback_data="buy:cancel"),
         ],
     ])

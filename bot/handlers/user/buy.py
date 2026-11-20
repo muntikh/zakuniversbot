@@ -27,8 +27,9 @@ from bot.db.crud import (
     set_order_status,
     validate_and_use_discount,
 )
+from sqlalchemy import select
 from bot.db.database import AsyncSessionLocal
-from bot.db.models import OrderStatus, PaymentMethod
+from bot.db.models import OrderStatus, PaymentMethod, Plan
 from bot.keyboards.user_kb import (
     admin_order_kb,
     after_delivery_kb,
@@ -36,12 +37,11 @@ from bot.keyboards.user_kb import (
     config_name_kb,
     delivery_choice_kb,
     discount_cancel_kb,
-    duration_plans_kb,
-    durations_catalog_kb,
+    os_plans_kb,
+    os_selection_kb,
     payment_kb,
     pending_order_kb,
     single_mode_kb,
-    user_count_tier_kb,
 )
 from bot.services.admin_sync import (
     save_admin_receipt_messages,
@@ -54,55 +54,120 @@ from bot.states.fsm import BuyStates
 router = Router(name="buy")
 
 # ─────────────────────────────────────────────────────────────
-# Plan & Tier Catalog (Strictly 4,000 Tomans per GB)
+# OS-Specific Plan Catalog (Android & iOS)
 # ─────────────────────────────────────────────────────────────
 
-PLANS_CATALOG: dict[int, dict[str, Any]] = {
-    30: {
-        "title": "۱ ماهه (۳۰ روز)",
-        "options": [
-            {"gb": 50, "base_price": 240000, "template_id": 5},
-            {"gb": 80, "base_price": 380000, "template_id": 14},
-            {"gb": 100, "base_price": 480000, "template_id": 15},
-        ],
-    },
-    60: {
-        "title": "۲ ماهه (۶۰ روز)",
-        "options": [
-            {"gb": 60, "base_price": 290000, "template_id": 13},
-            {"gb": 90, "base_price": 430000, "template_id": 15},
-        ],
-    },
-    90: {
-        "title": "۳ ماهه (۹۰ روز)",
-        "options": [
-            {"gb": 70, "base_price": 340000, "template_id": 20},
-            {"gb": 100, "base_price": 480000, "template_id": 21},
-        ],
-    },
-    180: {
-        "title": "۶ ماهه (۱۸۰ روز)",
-        "options": [
-            {"gb": 150, "base_price": 720000, "template_id": 23},
-            {"gb": 200, "base_price": 960000, "template_id": 23},
-        ],
-    },
-    365: {
-        "title": "۱ ساله (۳۶۵ روز)",
-        "options": [
-            {"gb": 150, "base_price": 600000, "template_id": 24},
-            {"gb": 250, "base_price": 1000000, "template_id": 24},
-            {"gb": 350, "base_price": 1400000, "template_id": 24},
-        ],
-    },
+OS_PLANS_CATALOG: dict[str, list[dict[str, Any]]] = {
+    "android": [
+        {
+            "key": "android_50gb_1m",
+            "btn_text": "1 ماه | 50 گیگ | 259ت",
+            "duration": 30,
+            "data_gb": 50,
+            "price": 259000,
+            "template_id": 5,
+            "title": "۱ ماهه ۵۰ گیگ (اندروید)",
+            "tier_title": "تک‌کاربره",
+        },
+        {
+            "key": "android_90gb_2m",
+            "btn_text": "2 ماه | 90 گیگ | 385ت",
+            "duration": 60,
+            "data_gb": 90,
+            "price": 385000,
+            "template_id": 15,
+            "title": "۲ ماهه ۹۰ گیگ (اندروید)",
+            "tier_title": "تک‌کاربره",
+        },
+        {
+            "key": "android_150gb_3m",
+            "btn_text": "3 ماه | 150 گیگ | 420ت",
+            "duration": 90,
+            "data_gb": 150,
+            "price": 420000,
+            "template_id": 16,
+            "title": "۳ ماهه ۱۵۰ گیگ (اندروید)",
+            "tier_title": "تک‌کاربره",
+        },
+    ],
+    "ios": [
+        {
+            "key": "ios_50gb_1m",
+            "btn_text": "1 ماه | 50 گیگ | 319ت",
+            "duration": 30,
+            "data_gb": 50,
+            "price": 319000,
+            "template_id": 5,
+            "title": "۱ ماهه ۵۰ گیگ (آیفون)",
+            "tier_title": "تک‌کاربره",
+        },
+        {
+            "key": "ios_90gb_2m",
+            "btn_text": "2 ماه | 90 گیگ | 435ت",
+            "duration": 60,
+            "data_gb": 90,
+            "price": 435000,
+            "template_id": 15,
+            "title": "۲ ماهه ۹۰ گیگ (آیفون)",
+            "tier_title": "تک‌کاربره",
+        },
+        {
+            "key": "ios_150gb_3m",
+            "btn_text": "3 ماه | 150 گیگ | 500ت",
+            "duration": 90,
+            "data_gb": 150,
+            "price": 500000,
+            "template_id": 16,
+            "title": "۳ ماهه ۱۵۰ گیگ (آیفون)",
+            "tier_title": "تک‌کاربره",
+        },
+        {
+            "key": "ios_unlimited_6m_3u",
+            "btn_text": "نامحدود | 6 ماه | 3 کاربر",
+            "duration": 180,
+            "data_gb": 0,
+            "price": 1500000,
+            "template_id": 26,
+            "title": "۶ ماهه نامحدود ۳ کاربر (آیفون)",
+            "tier_title": "۳ کاربره",
+        },
+    ],
 }
 
-TIERS_INFO: dict[str, dict[str, Any]] = {
-    "1": {"title": "تک‌کاربره", "extra_price": 0, "badge": "👤"},
-    "2": {"title": "دوکاربره", "extra_price": 20000, "badge": "👥"},
-    "3": {"title": "سه کاربره", "extra_price": 40000, "badge": "👨‍👩‍👧"},
-    "99": {"title": "کاربر نامحدود (∞)", "extra_price": 60000, "badge": "👨‍👩‍👦‍👦"},
+ALL_OS_PLANS: dict[str, dict[str, Any]] = {
+    p["key"]: p
+    for plist in OS_PLANS_CATALOG.values()
+    for p in plist
 }
+
+
+async def get_or_create_db_plan(session: Any, plan_meta: dict[str, Any]) -> int:
+    name = plan_meta["title"]
+    res = await session.execute(select(Plan).where(Plan.name == name))
+    p = res.scalar_one_or_none()
+    if p:
+        p.price_toman = plan_meta["price"]
+        p.data_gb = float(plan_meta["data_gb"])
+        p.duration_days = plan_meta["duration"]
+        p.pasarguard_template_id = plan_meta["template_id"]
+        p.is_active = True
+        p.show_in_menu = True
+        await session.commit()
+        return p.id
+
+    p = Plan(
+        name=name,
+        pasarguard_template_id=plan_meta["template_id"],
+        data_gb=float(plan_meta["data_gb"]),
+        duration_days=plan_meta["duration"],
+        price_toman=plan_meta["price"],
+        is_active=True,
+        show_in_menu=True,
+    )
+    session.add(p)
+    await session.commit()
+    await session.refresh(p)
+    return p.id
 
 
 def parse_expire_ts(val: Any) -> Optional[datetime]:
@@ -128,7 +193,7 @@ def build_delivery_caption(
     data_gb: float,
     sub_url: str,
     location: str = "نت ملی",
-    tier_name: str = "نامحدود",
+    tier_name: str = "تک‌کاربره",
 ) -> str:
     gb_text = "نامحدود" if data_gb == 0 else f"{data_gb:.0f} گیگ"
     day_text = "نامحدود" if duration_days == 0 else f"{duration_days} روزه"
@@ -136,7 +201,7 @@ def build_delivery_caption(
     return (
         "✅ <b>فاکتور با موفقیت پرداخت گردید و سرویس شما فعال گردید</b>\n\n"
         "🔑 <b>اطلاعات سرویس شما :</b>\n\n"
-        f"▫️ 📊 تعداد کاربر مجاز : <b>{tier_name}</b>\n"
+        f"▫️ 📊 مشخصات / کاربر : <b>{tier_name}</b>\n"
         f"▫️ 💰 هزینه سرویس : <b>{amount_toman:,} تومان</b>\n"
         f"▫️ 🔑 کد سرویس : <code>{service_code}</code>\n"
         f"▫️ 🗓 دوره پرداخت : <b>{day_text}</b>\n"
@@ -149,11 +214,12 @@ def build_delivery_caption(
 
 
 # ══════════════════════════════════════════════════════════════
-# Step 1 — Start Buy (Single Button: Net Meli)
+# Step 1 — Location Selection (Matches Image 1)
 # ══════════════════════════════════════════════════════════════
 
 @router.message(F.text.in_({"🚀 خرید سرویس جدید", "🛍️ خرید سرویس"}))
 @router.callback_query(F.data == "buy:start")
+@router.callback_query(F.data == "buy:back_to_loc")
 async def buy_start(update: types.Message | types.CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     user_id = update.from_user.id
@@ -187,10 +253,7 @@ async def buy_start(update: types.Message | types.CallbackQuery, state: FSMConte
             return
 
     await state.set_state(BuyStates.choosing_mode)
-    text = (
-        "🚀 <b>خرید سرویس جدید Zak Univers</b>\n\n"
-        "🌐 لطفاً وضعیت شبکه را انتخاب فرمایید:"
-    )
+    text = "💎 لوکیشن سرویست رو انتخاب کن :"
     markup = single_mode_kb()
 
     if isinstance(update, types.CallbackQuery):
@@ -210,165 +273,96 @@ async def cancel_existing_order(callback: types.CallbackQuery, state: FSMContext
 
 
 # ══════════════════════════════════════════════════════════════
-# Step 2 — Duration Selection
+# Step 2 — OS Selection (Matches Image 2)
 # ══════════════════════════════════════════════════════════════
 
-@router.callback_query(BuyStates.choosing_mode, F.data == "mode:national")
-async def choose_mode_national(callback: types.CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(mode_title="نت ملی")
-    await state.set_state(BuyStates.choosing_duration)
+@router.callback_query(BuyStates.choosing_mode, F.data.in_({"buy:loc:national", "mode:national"}))
+@router.callback_query(F.data == "buy:back_to_os")
+async def choose_os_step(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(location_title="نت ملی")
+    await state.set_state(BuyStates.choosing_os)
 
-    await callback.message.edit_text(
-        "🗓 <b>لطفاً مدت زمان اشتراک را انتخاب نمایید:</b>",
-        parse_mode="HTML",
-        reply_markup=durations_catalog_kb(),
-    )
+    text = "🕰 خب حالا سرویس رو برای چه مدت لازم داری؟"
+    markup = os_selection_kb()
 
-
-@router.callback_query(F.data == "buy:back_to_dur")
-async def back_to_durations(callback: types.CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(BuyStates.choosing_duration)
-    await callback.message.edit_text(
-        "🗓 <b>لطفاً مدت زمان اشتراک را انتخاب نمایید:</b>",
-        parse_mode="HTML",
-        reply_markup=durations_catalog_kb(),
-    )
+    await callback.answer()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 # ══════════════════════════════════════════════════════════════
-# Step 3 — Volume Plan Selection
+# Step 3 — OS Plans Selection (Matches Image 3 for iOS & Image 4 for Android)
 # ══════════════════════════════════════════════════════════════
 
-@router.callback_query(BuyStates.choosing_duration, F.data.startswith("dur:"))
-async def choose_duration(callback: types.CallbackQuery, state: FSMContext) -> None:
-    duration = int(callback.data.split(":")[1])
-    dur_data = PLANS_CATALOG.get(duration)
+@router.callback_query(BuyStates.choosing_os, F.data.in_({"buy:os:android", "buy:os:ios"}))
+@router.callback_query(F.data == "buy:back_to_plans")
+async def choose_plan_step(callback: types.CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if callback.data in ("buy:os:android", "buy:os:ios"):
+        os_name = "android" if callback.data == "buy:os:android" else "ios"
+        await state.update_data(os_name=os_name)
+    else:
+        os_name = data.get("os_name", "android")
 
-    if not dur_data:
-        await callback.answer("دوره یافت نشد.", show_alert=True)
+    await state.set_state(BuyStates.choosing_plan)
+    text = "💎 خب حالا سرویس رو برای چند کاربر لازم داری؟"
+    markup = os_plans_kb(os_name)
+
+    await callback.answer()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+# ══════════════════════════════════════════════════════════════
+# Step 4 — Plan Chosen -> Config Name Prompt
+# ══════════════════════════════════════════════════════════════
+
+@router.callback_query(BuyStates.choosing_plan, F.data.startswith("buy:plan:"))
+async def choose_plan_selected(callback: types.CallbackQuery, state: FSMContext) -> None:
+    plan_key = callback.data.split(":")[2]
+    plan_meta = ALL_OS_PLANS.get(plan_key)
+
+    if not plan_meta:
+        await callback.answer("پلن یافت نشد.", show_alert=True)
         return
 
-    await state.update_data(duration=duration, duration_title=dur_data["title"])
-    await state.set_state(BuyStates.choosing_plan)
-
-    await callback.message.edit_text(
-        f"📦 <b>پلن‌های اشتراک {dur_data['title']}:</b>\n\n"
-        "💰 تعرفه مصوب: <b>هر گیگابایت ۴,۰۰۰ تومان</b>\n\n"
-        "پلن مورد نظر را انتخاب نمایید:",
-        parse_mode="HTML",
-        reply_markup=duration_plans_kb(duration, dur_data["options"]),
-    )
-
-
-@router.callback_query(F.data == "buy:back_to_plans")
-async def back_to_plans(callback: types.CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    duration = data.get("duration", 30)
-    dur_data = PLANS_CATALOG.get(duration, PLANS_CATALOG[30])
-
-    await state.set_state(BuyStates.choosing_plan)
-    await callback.message.edit_text(
-        f"📦 <b>پلن‌های اشتراک {dur_data['title']}:</b>\n\n"
-        "💰 تعرفه مصوب: <b>هر گیگابایت ۴,۰۰۰ تومان</b>\n\n"
-        "پلن مورد نظر را انتخاب نمایید:",
-        parse_mode="HTML",
-        reply_markup=duration_plans_kb(duration, dur_data["options"]),
-    )
-
-
-# ══════════════════════════════════════════════════════════════
-# Step 4 — User Count Selection (تعداد کاربر)
-# ══════════════════════════════════════════════════════════════
-
-@router.callback_query(BuyStates.choosing_plan, F.data.startswith("plan_sel:"))
-async def choose_plan_volume(callback: types.CallbackQuery, state: FSMContext) -> None:
-    parts = callback.data.split(":")
-    duration = int(parts[1])
-    gb = int(parts[2])
-    base_price = int(parts[3])
-
-    # Find matching template_id from catalog
-    template_id = 3
-    for opt in PLANS_CATALOG.get(duration, {}).get("options", []):
-        if opt["gb"] == gb:
-            template_id = opt["template_id"]
-            break
+    os_name = data.get("os_name", "android")
 
     await state.update_data(
-        duration=duration,
-        data_gb=gb,
-        base_price=base_price,
-        template_id=template_id,
-    )
-    await state.set_state(BuyStates.choosing_tier)
-
-    await callback.message.edit_text(
-        "💎 <b>خب حالا سرویس رو برای چند کاربر لازم داری؟</b>\n\n"
-        "📌 <i>به ازای هر کاربر اضافه، مبلغ ۲۰,۰۰۰ تومان به مبلغ پایه افزوده خواهد شد:</i>",
-        parse_mode="HTML",
-        reply_markup=user_count_tier_kb(),
-    )
-
-
-@router.callback_query(F.data == "buy:back_to_tiers")
-async def back_to_tiers(callback: types.CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(BuyStates.choosing_tier)
-    await callback.message.edit_text(
-        "💎 <b>خب حالا سرویس رو برای چند کاربر لازم داری؟</b>\n\n"
-        "📌 <i>به ازای هر کاربر اضافه، مبلغ ۲۰,۰۰۰ تومان به مبلغ پایه افزوده خواهد شد:</i>",
-        parse_mode="HTML",
-        reply_markup=user_count_tier_kb(),
-    )
-
-
-# ══════════════════════════════════════════════════════════════
-# Step 5 — Config Name Selection (Zak-*****)
-# ══════════════════════════════════════════════════════════════
-
-@router.callback_query(BuyStates.choosing_tier, F.data.startswith("tier_sel:"))
-async def choose_tier(callback: types.CallbackQuery, state: FSMContext) -> None:
-    parts = callback.data.split(":")
-    tier_key = parts[1]
-    extra_price = int(parts[2])
-
-    tier_meta = TIERS_INFO.get(tier_key, TIERS_INFO["1"])
-    data = await state.get_data()
-    base_price = data.get("base_price", 0)
-    final_price = base_price + extra_price
-
-    await state.update_data(
-        tier_key=tier_key,
-        tier_title=tier_meta["title"],
-        extra_user_price=extra_price,
-        final_price=final_price,
+        plan_key=plan_key,
+        os_name=os_name,
+        plan_title=plan_meta["title"],
+        btn_text=plan_meta["btn_text"],
+        duration=plan_meta["duration"],
+        data_gb=plan_meta["data_gb"],
+        base_price=plan_meta["price"],
+        final_price=plan_meta["price"],
+        template_id=plan_meta["template_id"],
+        tier_title=plan_meta["tier_title"],
         discount_percent=0,
     )
     await state.set_state(BuyStates.entering_config_name)
 
-    gb = data.get("data_gb", 20)
-    duration = data.get("duration", 30)
-
-    await callback.message.edit_text(
-        f"📦 پلن: <b>{gb} گیگ — {duration} روزه ({tier_meta['title']})</b>\n"
-        f"💰 مبلغ کل: <b>{final_price:,} تومان</b>\n\n"
+    text = (
+        f"📦 پلن: <b>{plan_meta['btn_text']}</b>\n"
+        f"💰 مبلغ: <b>{plan_meta['price']:,} تومان</b>\n\n"
         "✏️ <b>انتخاب نام دلخواه برای کانفیگ:</b>\n\n"
         "📌 پیشوند شناسه همواره با <code>Zak-</code> آغاز می‌شود (مثال: <code>Zak-pro</code>).\n\n"
-        "می‌توانید یک نام دلخواه انگلیسی ارسال کنید، یا روی <b>«🎲 تولید نام تصادفی»</b> بزنید:",
-        parse_mode="HTML",
-        reply_markup=config_name_kb(),
+        "می‌توانید یک نام دلخواه انگلیسی ارسال کنید، یا روی <b>«🎲 تولید نام تصادفی»</b> بزنید:"
     )
+    markup = config_name_kb()
+    await callback.answer()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 async def show_pre_invoice(update: types.Message | types.CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     final_price = data.get("final_price", 0)
     config_name = data.get("config_name", "Zak-user")
-    mode_title = data.get("mode_title", "نت ملی")
-    duration = data.get("duration", 30)
-    gb = data.get("data_gb", 20)
+    location_title = data.get("location_title", "نت ملی")
+    os_name = data.get("os_name", "android")
+    os_title = "اندروید (Android)" if os_name == "android" else "آیفون (iOS)"
+    btn_text = data.get("btn_text", "سرویس اختصاصی")
     tier_title = data.get("tier_title", "تک‌کاربره")
-    base_price = data.get("base_price", final_price)
-    extra_user_price = data.get("extra_user_price", 0)
 
     user_id = update.from_user.id
     async with AsyncSessionLocal() as session:
@@ -376,13 +370,12 @@ async def show_pre_invoice(update: types.Message | types.CallbackQuery, state: F
 
     text = (
         "📋 <b>پیش‌فاکتور نهایی سفارش Zak Univers:</b>\n\n"
-        f"▫️ 💎 وضعیت شبکه: <b>{mode_title}</b>\n"
-        f"▫️ 📦 پلن انتخابی: <b>{gb} گیگابایت — {duration} روزه</b>\n"
-        f"▫️ 👥 تعداد کاربر مجاز: <b>{tier_title}</b>\n"
+        f"▫️ 💎 وضعیت لوکیشن: <b>{location_title}</b>\n"
+        f"▫️ 📱 سیستم‌عامل: <b>{os_title}</b>\n"
+        f"▫️ 📦 پلن انتخابی: <b>{btn_text}</b>\n"
+        f"▫️ 👥 مشخصات: <b>{tier_title}</b>\n"
         f"▫️ 🔑 شناسه کانفیگ: <code>{config_name}</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"▫️ 💵 مبلغ پایه حجم: {base_price:,} تومان\n"
-        f"▫️ ➕ اضافه بهای کاربران: {extra_user_price:,} تومان\n"
         f"▫️ 💰 <b>مبلغ نهایی قابل پرداخت: {final_price:,} تومان</b>\n\n"
         "روش پرداخت مورد نظر را انتخاب نمایید:"
     )
@@ -472,7 +465,8 @@ async def process_discount(message: types.Message, state: FSMContext) -> None:
 async def pay_card(callback: types.CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     final_price = data.get("final_price", 0)
-    template_id = data.get("template_id", 3)
+    plan_key = data.get("plan_key", "")
+    plan_meta = ALL_OS_PLANS.get(plan_key, list(ALL_OS_PLANS.values())[0])
     discount_percent = data.get("discount_percent", 0)
     config_name = data.get("config_name", "Zak-user")
     expiry = datetime.utcnow() + timedelta(minutes=settings.order_expiry_minutes)
@@ -480,11 +474,14 @@ async def pay_card(callback: types.CallbackQuery, state: FSMContext) -> None:
     async with AsyncSessionLocal() as session:
         card_number = await get_setting(session, "BANK_CARD", "6063731268895845")
         bank_name = await get_setting(session, "BANK_NAME", "مهر ایران")
+        card_holder = await get_setting(session, "CARD_HOLDER", "علی زکریا رشیدی")
+
+        db_plan_id = await get_or_create_db_plan(session, plan_meta)
 
         order = await create_order(
             session,
             user_id=callback.from_user.id,
-            plan_id=template_id,
+            plan_id=db_plan_id,
             amount_toman=final_price,
             discount_applied=discount_percent,
             expires_at=expiry,
@@ -501,7 +498,8 @@ async def pay_card(callback: types.CallbackQuery, state: FSMContext) -> None:
         f"💰 مبلغ قابل پرداخت (تومان):\n<code>{final_price}</code>\n"
         f"<i>(معادل {final_price:,} تومان)</i>\n\n"
         f"💳 شماره کارت بانکی:\n<code>{card_number}</code>\n"
-        f"🏦 بانک: <b>{bank_name}</b>\n\n"
+        f"🏦 بانک: <b>{bank_name}</b>\n"
+        f"👤 به نام: <b>{card_holder}</b>\n\n"
         f"👆 <i>(برای کپی کردن کافیست روی مبلغ یا شماره کارت لمس کنید)</i>\n\n"
         f"⏳ مهلت پرداخت: <b>{settings.order_expiry_minutes} دقیقه</b>\n"
         f"📌 کد سفارش شما: <code>{order.id}</code>\n"
@@ -520,30 +518,35 @@ async def pay_card(callback: types.CallbackQuery, state: FSMContext) -> None:
 async def pay_wallet(callback: types.CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     final_price = data.get("final_price", 0)
-    template_id = data.get("template_id", 3)
-    duration = data.get("duration", 30)
-    data_gb = data.get("data_gb", 20)
     config_name = data.get("config_name", "Zak-user")
-    mode_title = data.get("mode_title", "نت ملی")
-    tier_title = data.get("tier_title", "نامحدود")
+    plan_key = data.get("plan_key", "")
+    plan_meta = ALL_OS_PLANS.get(plan_key, list(ALL_OS_PLANS.values())[0])
+    template_id = plan_meta["template_id"]
+    duration = plan_meta["duration"]
+    data_gb = plan_meta["data_gb"]
+    tier_title = plan_meta["tier_title"]
+    location_title = data.get("location_title", "نت ملی")
+    user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
-        user = await get_user(session, callback.from_user.id)
+        user = await get_user(session, user_id)
         if not user or user.balance_toman < final_price:
             await callback.answer("⚠️ موجودی کیف پول شما برای این خرید کافی نیست.", show_alert=True)
             return
 
+        db_plan_id = await get_or_create_db_plan(session, plan_meta)
+
         await deduct_wallet_balance(
             session,
-            user_id=callback.from_user.id,
+            user_id=user_id,
             amount_toman=final_price,
-            description=f"خرید سرویس {data_gb} گیگ — {duration} روزه ({config_name})",
+            description=f"خرید سرویس {plan_meta['title']} ({config_name})",
         )
 
         order = await create_order(
             session,
-            user_id=callback.from_user.id,
-            plan_id=template_id,
+            user_id=user_id,
+            plan_id=db_plan_id,
             amount_toman=final_price,
             custom_config_name=config_name,
         )
@@ -559,16 +562,24 @@ async def pay_wallet(callback: types.CallbackQuery, state: FSMContext) -> None:
             note=f"order:{order.id}|user:{order.user_id}",
             custom_username=config_name,
         )
-        sub_url = user_data.get("subscription_url", "")
         marzban_username = user_data.get("username", "")
-        expire_ts = parse_expire_ts(user_data.get("expire"))
-        data_limit = user_data.get("data_limit", 0)
 
-        # Set exact limit and expiry if needed
-        exact_bytes = int(data_gb * (1024**3))
-        if exact_bytes > 0 and data_limit != exact_bytes:
-            await panel.modify_user(marzban_username, {"data_limit": exact_bytes})
-            data_limit = exact_bytes
+        # Set exact limit and expiry
+        modify_payload: dict[str, Any] = {}
+        exact_bytes = int(data_gb * (1024**3)) if data_gb > 0 else 0
+        modify_payload["data_limit"] = exact_bytes
+
+        if duration > 0:
+            exp_dt = datetime.now(timezone.utc) + timedelta(days=duration)
+            modify_payload["expire"] = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            modify_payload["status"] = "active"
+
+        await panel.modify_user(marzban_username, modify_payload)
+        fresh_user = await panel.get_user(marzban_username, force_fresh=True)
+
+        sub_url = fresh_user.get("subscription_url", "")
+        expire_ts = parse_expire_ts(fresh_user.get("expire"))
+        data_limit = fresh_user.get("data_limit", exact_bytes)
 
         async with AsyncSessionLocal() as session:
             await create_subscription(
@@ -589,7 +600,7 @@ async def pay_wallet(callback: types.CallbackQuery, state: FSMContext) -> None:
             duration_days=duration,
             data_gb=data_gb,
             sub_url=sub_url,
-            location=mode_title,
+            location=location_title,
             tier_name=tier_title,
         )
         delivery_kb = after_delivery_kb(sub_url)
@@ -823,8 +834,19 @@ async def user_choose_direct(callback: types.CallbackQuery, state: FSMContext) -
             return
 
         amount_toman = order.amount_toman
-        template_id = order.plan_id or 3
         custom_config_name = order.custom_config_name or f"Zak-{user_id}"
+
+        plan = await get_plan(session, order.plan_id)
+        if plan:
+            template_id = plan.pasarguard_template_id
+            data_gb = plan.data_gb
+            duration_days = plan.duration_days
+            tier_name = "۳ کاربره" if "۳ کاربر" in plan.name else "تک‌کاربره"
+        else:
+            template_id = 5
+            data_gb = 50.0
+            duration_days = 30
+            tier_name = "تک‌کاربره"
 
     await callback.answer("🚀 در حال صدور کانفیگ اختصاصی شما...")
 
@@ -835,6 +857,25 @@ async def user_choose_direct(callback: types.CallbackQuery, state: FSMContext) -
             note=f"order:{order_id}|user:{user_id}",
             custom_username=custom_config_name,
         )
+        marzban_username = user_data.get("username", "")
+
+        # Set exact limits and duration
+        modify_payload: dict[str, Any] = {}
+        exact_bytes = int(data_gb * (1024**3)) if data_gb > 0 else 0
+        modify_payload["data_limit"] = exact_bytes
+
+        if duration_days > 0:
+            exp_dt = datetime.now(timezone.utc) + timedelta(days=duration_days)
+            modify_payload["expire"] = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            modify_payload["status"] = "active"
+
+        await panel.modify_user(marzban_username, modify_payload)
+        fresh_user = await panel.get_user(marzban_username, force_fresh=True)
+
+        sub_url = fresh_user.get("subscription_url", "")
+        expire_ts = parse_expire_ts(fresh_user.get("expire"))
+        data_limit = fresh_user.get("data_limit", exact_bytes)
+
     except Exception as exc:
         logger.error(f"User direct provision failed: {exc}")
         await callback.message.edit_text(
@@ -844,11 +885,6 @@ async def user_choose_direct(callback: types.CallbackQuery, state: FSMContext) -
             parse_mode="HTML",
         )
         return
-
-    sub_url = user_data.get("subscription_url", "")
-    marzban_username = user_data.get("username", "")
-    expire_ts = parse_expire_ts(user_data.get("expire"))
-    data_limit = user_data.get("data_limit", 0)
 
     async with AsyncSessionLocal() as session:
         await create_subscription(
@@ -872,9 +908,11 @@ async def user_choose_direct(callback: types.CallbackQuery, state: FSMContext) -
     caption = build_delivery_caption(
         amount_toman=amount_toman,
         service_code=marzban_username,
-        duration_days=30,
-        data_gb=data_limit / (1024**3) if data_limit else 0,
+        duration_days=duration_days,
+        data_gb=data_gb,
         sub_url=sub_url,
+        location="نت ملی",
+        tier_name=tier_name,
     )
     delivery_kb = after_delivery_kb(sub_url)
 
