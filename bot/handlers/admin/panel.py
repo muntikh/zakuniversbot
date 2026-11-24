@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from html import escape as html_escape
 import re
 import time
 from typing import Any, Optional
@@ -246,7 +247,7 @@ async def process_bank_name(message: types.Message, state: FSMContext) -> None:
 # ══════════════════════════════════════════════════════════════
 
 def clean_btn_url(raw_url: str) -> str:
-    url = raw_url.strip()
+    url = raw_url.strip(" \t\r\n\u200c\u200d\u200e\u200f\ufeff")
     if url.startswith("@"):
         return f"https://t.me/{url[1:]}"
     if url.startswith("t.me/"):
@@ -258,14 +259,20 @@ def clean_btn_url(raw_url: str) -> str:
 
 def is_valid_btn_url(url: str) -> bool:
     try:
+        if not url or any(ch.isspace() for ch in url):
+            return False
         p = urlparse(url)
-        return bool(p.scheme in ("http", "https", "tg") and (p.netloc or url.startswith("tg://")))
+        if p.scheme in ("http", "https"):
+            return bool(p.netloc and "." in p.netloc)
+        if p.scheme == "tg":
+            return bool(p.netloc)
+        return False
     except Exception:
         return False
 
 
 def parse_single_btn(part: str) -> Optional[types.InlineKeyboardButton]:
-    part = part.strip()
+    part = part.strip(" \t\r\n\u200c\u200d\u200e\u200f\ufeff")
     if not part:
         return None
 
@@ -337,7 +344,8 @@ async def send_broadcast_message(
     file_id: Optional[str] = None,
     entities: Optional[list[types.MessageEntity]] = None,
 ) -> Any:
-    # 1. Primary engine: copy_message (preserves original format, album, forward info, etc.)
+    """Delivers broadcast via copy_message and falls back to direct send with parse_mode=None."""
+    # 1. Primary engine: copy_message (preserves original format, forward info, etc.)
     try:
         return await bot.copy_message(
             chat_id=chat_id,
@@ -346,73 +354,86 @@ async def send_broadcast_message(
             reply_markup=reply_markup,
         )
     except (TelegramRetryAfter, TelegramForbiddenError):
-        # Let retry/block handling take place in caller
         raise
     except Exception as copy_err:
-        # Fallback to direct sending using file_id / text!
+        # 2. Fallback to direct sending using saved file_id / text (pass parse_mode=None so DefaultBotProperties HTML doesn't clash with entities or '<')
+        cap = text_content or None
+        cap_ents = entities if cap else None
         if msg_type == "text" and text_content:
             return await bot.send_message(
                 chat_id=chat_id,
                 text=text_content,
+                parse_mode=None,
                 entities=entities,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "photo" and file_id:
+        if msg_type == "photo" and file_id:
             return await bot.send_photo(
                 chat_id=chat_id,
                 photo=file_id,
-                caption=text_content,
-                caption_entities=entities,
+                caption=cap,
+                parse_mode=None,
+                caption_entities=cap_ents,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "video" and file_id:
+        if msg_type == "video" and file_id:
             return await bot.send_video(
                 chat_id=chat_id,
                 video=file_id,
-                caption=text_content,
-                caption_entities=entities,
+                caption=cap,
+                parse_mode=None,
+                caption_entities=cap_ents,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "animation" and file_id:
+        if msg_type == "video_note" and file_id:
+            return await bot.send_video_note(
+                chat_id=chat_id,
+                video_note=file_id,
+                reply_markup=reply_markup,
+            )
+        if msg_type == "animation" and file_id:
             return await bot.send_animation(
                 chat_id=chat_id,
                 animation=file_id,
-                caption=text_content,
-                caption_entities=entities,
+                caption=cap,
+                parse_mode=None,
+                caption_entities=cap_ents,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "document" and file_id:
+        if msg_type == "document" and file_id:
             return await bot.send_document(
                 chat_id=chat_id,
                 document=file_id,
-                caption=text_content,
-                caption_entities=entities,
+                caption=cap,
+                parse_mode=None,
+                caption_entities=cap_ents,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "voice" and file_id:
+        if msg_type == "voice" and file_id:
             return await bot.send_voice(
                 chat_id=chat_id,
                 voice=file_id,
-                caption=text_content,
-                caption_entities=entities,
+                caption=cap,
+                parse_mode=None,
+                caption_entities=cap_ents,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "audio" and file_id:
+        if msg_type == "audio" and file_id:
             return await bot.send_audio(
                 chat_id=chat_id,
                 audio=file_id,
-                caption=text_content,
-                caption_entities=entities,
+                caption=cap,
+                parse_mode=None,
+                caption_entities=cap_ents,
                 reply_markup=reply_markup,
             )
-        elif msg_type == "sticker" and file_id:
+        if msg_type == "sticker" and file_id:
             return await bot.send_sticker(
                 chat_id=chat_id,
                 sticker=file_id,
                 reply_markup=reply_markup,
             )
-        else:
-            raise copy_err
+        raise copy_err
 
 
 @router.callback_query(F.data == "admin:broadcast")
@@ -420,6 +441,10 @@ async def start_broadcast(callback: types.CallbackQuery, state: FSMContext) -> N
     if not is_admin(callback.from_user.id):
         return
 
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await state.clear()
     await state.set_state(AdminBroadcastStates.choosing_target)
 
@@ -511,6 +536,10 @@ async def on_broadcast_target_chosen(callback: types.CallbackQuery, state: FSMCo
         ]
     )
 
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
 
 
@@ -531,6 +560,9 @@ async def on_broadcast_message_received(message: types.Message, state: FSMContex
     elif message.video:
         msg_type = "video"
         file_id = message.video.file_id
+    elif message.video_note:
+        msg_type = "video_note"
+        file_id = message.video_note.file_id
     elif message.animation:
         msg_type = "animation"
         file_id = message.animation.file_id
@@ -580,11 +612,16 @@ async def on_broadcast_message_received(message: types.Message, state: FSMContex
 
 
 @router.callback_query(AdminBroadcastStates.choosing_button_option, F.data == "bcast:btn:add")
+@router.callback_query(AdminBroadcastStates.entering_buttons, F.data == "bcast:btn:add")
 @router.callback_query(AdminBroadcastStates.confirming_broadcast, F.data == "bcast:btn:add")
 async def ask_broadcast_buttons(callback: types.CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         return
 
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await state.set_state(AdminBroadcastStates.entering_buttons)
 
     text = (
@@ -639,10 +676,15 @@ async def process_broadcast_buttons_input(message: types.Message, state: FSMCont
 
 @router.callback_query(AdminBroadcastStates.choosing_button_option, F.data == "bcast:btn:skip")
 @router.callback_query(AdminBroadcastStates.entering_buttons, F.data == "bcast:btn:skip")
+@router.callback_query(AdminBroadcastStates.confirming_broadcast, F.data == "bcast:btn:skip")
 async def skip_broadcast_buttons(callback: types.CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         return
 
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await state.update_data(buttons_raw=None)
     await render_broadcast_preview(callback.bot, callback.message.chat.id, state)
 
@@ -689,7 +731,7 @@ async def render_broadcast_preview(bot: Bot, admin_chat_id: int, state: FSMConte
         await bot.send_message(
             chat_id=admin_chat_id,
             text=(
-                f"⚠️ <b>خطا در نمایش پیش‌نمایش:</b>\n<code>{exc}</code>\n\n"
+                f"⚠️ <b>خطا در نمایش پیش‌نمایش:</b>\n<code>{html_escape(error_msg)}</code>\n\n"
                 "علت معمولاً نامعتبر بودن لینک دکمه‌ها یا عدم دسترسی به پیام مبدأ است."
             ),
             parse_mode="HTML",
@@ -738,7 +780,7 @@ async def render_broadcast_preview(bot: Bot, admin_chat_id: int, state: FSMConte
         # Pre-flight safety lock: prevent launching a broken broadcast!
         control_text = (
             "❌ <b>امکان ارسال این پیام وجود ندارد!</b>\n\n"
-            f"▫️ علت خطا: <code>{error_msg}</code>\n\n"
+            f"▫️ علت خطا: <code>{html_escape(error_msg)}</code>\n\n"
             "لطفاً دکمه‌های شیشه‌ای را مجدداً تنظیم کرده یا پیام را دوباره ارسال فرمایید."
         )
         control_kb = types.InlineKeyboardMarkup(
@@ -834,6 +876,11 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
     if not is_admin(callback.from_user.id):
         return
 
+    try:
+        await callback.answer("🚀 عملیات ارسال همگانی آغاز شد!")
+    except Exception:
+        pass
+
     data = await state.get_data()
     await state.clear()
 
@@ -893,12 +940,15 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
         )
         return
 
-    status_msg = await callback.message.edit_text(
+    init_status_text = (
         f"🚀 <b>ارسال پیام همگانی آغاز شد...</b>\n\n"
         f"▫️ مخاطبان: <b>{target_title}</b> ({total_target:,} نفر)\n"
-        f"▫️ وضعیت: در حال ارسال...",
-        parse_mode="HTML",
+        f"▫️ وضعیت: در حال ارسال..."
     )
+    try:
+        status_msg = await callback.message.edit_text(init_status_text, parse_mode="HTML")
+    except Exception:
+        status_msg = await callback.message.answer(init_status_text, parse_mode="HTML")
 
     start_ts = time.time()
     sent = 0
@@ -906,6 +956,16 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
     blocked_count = 0
     error_reasons: set[str] = set()
     last_update_ts = time.time()
+
+    async def _mark_blocked(user_id: int) -> None:
+        nonlocal blocked_count
+        blocked_count += 1
+        try:
+            async with AsyncSessionLocal() as s:
+                await s.execute(update(User).where(User.telegram_id == user_id).values(is_blocked=True))
+                await s.commit()
+        except Exception:
+            pass
 
     for idx, uid in enumerate(target_user_ids, 1):
         try:
@@ -926,7 +986,7 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
                     await callback.bot.pin_chat_message(
                         chat_id=uid,
                         message_id=sent_msg.message_id,
-                        both_sides=False,
+                        disable_notification=False,
                     )
                 except Exception:
                     pass
@@ -948,21 +1008,30 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
                 sent += 1
                 if is_pin and sent_msg:
                     try:
-                        await callback.bot.pin_chat_message(uid, sent_msg.message_id, both_sides=False)
+                        await callback.bot.pin_chat_message(
+                            chat_id=uid,
+                            message_id=sent_msg.message_id,
+                            disable_notification=False,
+                        )
                     except Exception:
                         pass
+            except TelegramForbiddenError:
+                failed += 1
+                await _mark_blocked(uid)
             except Exception as exc_after:
                 failed += 1
                 error_reasons.add(str(exc_after))
         except TelegramForbiddenError:
             failed += 1
-            blocked_count += 1
-            try:
-                async with AsyncSessionLocal() as s:
-                    await s.execute(update(User).where(User.telegram_id == uid).values(is_blocked=True))
-                    await s.commit()
-            except Exception:
-                pass
+            await _mark_blocked(uid)
+        except TelegramBadRequest as exc:
+            failed += 1
+            err_l = str(exc).lower()
+            if "chat not found" in err_l or "user is deactivated" in err_l or "blocked by the user" in err_l:
+                await _mark_blocked(uid)
+            else:
+                error_reasons.add(str(exc))
+                logger.warning(f"Broadcast bad request for user {uid}: {exc}")
         except Exception as exc:
             failed += 1
             error_reasons.add(str(exc))
@@ -996,7 +1065,7 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
 
     error_summary = ""
     if error_reasons:
-        reasons_list = [f"• <code>{r}</code>" for r in list(error_reasons)[:3]]
+        reasons_list = [f"• <code>{html_escape(r)}</code>" for r in list(error_reasons)[:3]]
         error_summary = "\n\n⚠️ <b>دلایل عمده خطاهای رخ‌داده:</b>\n" + "\n".join(reasons_list)
 
     warning_box = ""

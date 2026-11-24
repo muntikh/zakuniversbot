@@ -51,6 +51,14 @@ MENU_COMMANDS_AND_BUTTONS = {
 }
 
 
+FREE_TEXT_INPUT_STATES = {
+    "AdminBroadcastStates:waiting_message",
+    "AdminBroadcastStates:entering_buttons",
+    "SupportStates:writing_message",
+    "SupportStates:waiting_custom_subject",
+}
+
+
 class NavigationFSMResetMiddleware(BaseMiddleware):
     """
     CRITICAL: Automatically clears any active FSM state when user presses
@@ -66,13 +74,24 @@ class NavigationFSMResetMiddleware(BaseMiddleware):
         if state:
             if isinstance(event, types.Message) and event.text:
                 text = event.text.strip()
-                if (
-                    text.startswith("/")
-                    or text in MENU_COMMANDS_AND_BUTTONS
-                    or any(k in text for k in ("منوی اصلی", "انصراف", "بازگشت به منو", "پشتیبانی"))
-                ):
-                    current_state = await state.get_state()
-                    if current_state:
+                current_state = await state.get_state()
+                if current_state:
+                    cmd = text.split()[0].lower() if text.startswith("/") else ""
+                    is_exact_cmd_or_btn = (
+                        text in MENU_COMMANDS_AND_BUTTONS
+                        or cmd in {"/start", "/cancel", "/help", "/admin", "/menu"}
+                    )
+                    # Avoid substring reset inside free-text broadcast messages, button URLs/labels, or support tickets
+                    is_short_nav_phrase = (
+                        current_state not in FREE_TEXT_INPUT_STATES
+                        and "\n" not in text
+                        and len(text) <= 40
+                        and (
+                            text.startswith("/")
+                            or any(k in text for k in ("منوی اصلی", "انصراف", "بازگشت به منو", "پشتیبانی"))
+                        )
+                    )
+                    if is_exact_cmd_or_btn or is_short_nav_phrase:
                         logger.debug(f"Navigation text triggered; clearing state: {current_state}")
                         await state.clear()
             elif isinstance(event, types.CallbackQuery) and event.data:

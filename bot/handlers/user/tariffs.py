@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router, types
+from aiogram.fsm.context import FSMContext
 
 router = Router(name="tariffs")
 
@@ -36,11 +37,6 @@ async def show_tariffs(message: types.Message) -> None:
 
 
 @router.callback_query(F.data == "buy:start_quick")
-async def quick_buy(callback: types.CallbackQuery) -> None:
-    from bot.keyboards.user_kb import single_mode_kb
-    await callback.message.answer(
-        "💎 لوکیشن سرویست رو انتخاب کن :",
-        parse_mode="HTML",
-        reply_markup=single_mode_kb(),
-    )
-    await callback.answer()
+async def quick_buy(callback: types.CallbackQuery, state: FSMContext) -> None:
+    from bot.handlers.user.buy import buy_start
+    await buy_start(callback, state)
