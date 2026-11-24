@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router, types
 from aiogram.exceptions import (
@@ -243,11 +245,68 @@ async def process_bank_name(message: types.Message, state: FSMContext) -> None:
 # AAA Professional Broadcast Engine
 # ══════════════════════════════════════════════════════════════
 
+def clean_btn_url(raw_url: str) -> str:
+    url = raw_url.strip()
+    if url.startswith("@"):
+        return f"https://t.me/{url[1:]}"
+    if url.startswith("t.me/"):
+        return f"https://{url}"
+    if not url.startswith(("http://", "https://", "tg://")):
+        return f"https://{url}"
+    return url
+
+
+def is_valid_btn_url(url: str) -> bool:
+    try:
+        p = urlparse(url)
+        return bool(p.scheme in ("http", "https", "tg") and (p.netloc or url.startswith("tg://")))
+    except Exception:
+        return False
+
+
+def parse_single_btn(part: str) -> Optional[types.InlineKeyboardButton]:
+    part = part.strip()
+    if not part:
+        return None
+
+    # 1. Markdown syntax: [Label](URL)
+    m = re.match(r"^\[(.*?)\]\((.*?)\)$", part)
+    if m:
+        lbl = m.group(1).strip()
+        u = clean_btn_url(m.group(2).strip())
+        if lbl and is_valid_btn_url(u):
+            return types.InlineKeyboardButton(text=lbl, url=u)
+
+    # 2. Delimiter split with regex so that '+' inside URLs (e.g. t.me/+hash) is NEVER matched
+    delim_patterns = [
+        r"\s*[\+\-\:\=]\s*(?=(?:https?:\/\/|tg:\/\/|t\.me\/|@|[a-zA-Z0-9\-_]+\.[a-zA-Z]{2,}))",
+        r"\s+[\+\-\:\=]\s+",
+        r"\s*[\+\-\:\=]\s*",
+    ]
+    for dp in delim_patterns:
+        splits = re.split(dp, part, maxsplit=1)
+        if len(splits) == 2:
+            lbl = splits[0].strip()
+            u = clean_btn_url(splits[1].strip())
+            if lbl and is_valid_btn_url(u):
+                return types.InlineKeyboardButton(text=lbl, url=u)
+
+    # 3. Fallback: find URL anywhere inside part
+    url_m = re.search(r"(https?://\S+|tg://\S+|t\.me/\S+|@[\w\d_]+)", part)
+    if url_m:
+        lbl = part[:url_m.start()].strip(" \t\n-+:=|")
+        u = clean_btn_url(url_m.group(0))
+        if lbl and is_valid_btn_url(u):
+            return types.InlineKeyboardButton(text=lbl, url=u)
+
+    return None
+
+
 def parse_inline_buttons(text: str) -> Optional[types.InlineKeyboardMarkup]:
     """
     Parses admin input into an InlineKeyboardMarkup.
     Supports single or multiple buttons per row using '|'.
-    Format: Button Text + https://url.com
+    Handles @channels, markdown [title](url), and '+' inside private invite links cleanly.
     """
     if not text:
         return None
@@ -257,30 +316,103 @@ def parse_inline_buttons(text: str) -> Optional[types.InlineKeyboardMarkup]:
         row = []
         btn_parts = [p.strip() for p in line.split("|") if p.strip()]
         for part in btn_parts:
-            btn_name, btn_url = None, None
-            if "+" in part:
-                btn_name, btn_url = part.rsplit("+", 1)
-            elif " - " in part:
-                btn_name, btn_url = part.rsplit(" - ", 1)
-            elif " http" in part:
-                idx = part.find(" http")
-                btn_name, btn_url = part[:idx], part[idx+1:]
-
-            if not btn_name or not btn_url:
-                continue
-
-            btn_name = btn_name.strip()
-            btn_url = btn_url.strip()
-
-            if not btn_url.startswith(("http://", "https://", "tg://")):
-                btn_url = "https://" + btn_url
-
-            row.append(types.InlineKeyboardButton(text=btn_name, url=btn_url))
+            btn = parse_single_btn(part)
+            if btn:
+                row.append(btn)
 
         if row:
             rows.append(row)
 
     return types.InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+async def send_broadcast_message(
+    bot: Bot,
+    chat_id: int,
+    content_chat_id: int,
+    content_msg_id: int,
+    reply_markup: Optional[types.InlineKeyboardMarkup],
+    msg_type: str = "text",
+    text_content: str = "",
+    file_id: Optional[str] = None,
+    entities: Optional[list[types.MessageEntity]] = None,
+) -> Any:
+    # 1. Primary engine: copy_message (preserves original format, album, forward info, etc.)
+    try:
+        return await bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=content_chat_id,
+            message_id=content_msg_id,
+            reply_markup=reply_markup,
+        )
+    except (TelegramRetryAfter, TelegramForbiddenError):
+        # Let retry/block handling take place in caller
+        raise
+    except Exception as copy_err:
+        # Fallback to direct sending using file_id / text!
+        if msg_type == "text" and text_content:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text_content,
+                entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "photo" and file_id:
+            return await bot.send_photo(
+                chat_id=chat_id,
+                photo=file_id,
+                caption=text_content,
+                caption_entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "video" and file_id:
+            return await bot.send_video(
+                chat_id=chat_id,
+                video=file_id,
+                caption=text_content,
+                caption_entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "animation" and file_id:
+            return await bot.send_animation(
+                chat_id=chat_id,
+                animation=file_id,
+                caption=text_content,
+                caption_entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "document" and file_id:
+            return await bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
+                caption=text_content,
+                caption_entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "voice" and file_id:
+            return await bot.send_voice(
+                chat_id=chat_id,
+                voice=file_id,
+                caption=text_content,
+                caption_entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "audio" and file_id:
+            return await bot.send_audio(
+                chat_id=chat_id,
+                audio=file_id,
+                caption=text_content,
+                caption_entities=entities,
+                reply_markup=reply_markup,
+            )
+        elif msg_type == "sticker" and file_id:
+            return await bot.send_sticker(
+                chat_id=chat_id,
+                sticker=file_id,
+                reply_markup=reply_markup,
+            )
+        else:
+            raise copy_err
 
 
 @router.callback_query(F.data == "admin:broadcast")
@@ -292,16 +424,27 @@ async def start_broadcast(callback: types.CallbackQuery, state: FSMContext) -> N
     await state.set_state(AdminBroadcastStates.choosing_target)
 
     async with AsyncSessionLocal() as session:
-        count_all = await session.scalar(select(func.count(User.telegram_id)).where(User.is_banned == False)) or 0
+        count_all = await session.scalar(
+            select(func.count(User.telegram_id)).where(
+                User.is_banned == False,
+                User.is_blocked == False,
+            )
+        ) or 0
         count_buyers = await session.scalar(
-            select(func.count(distinct(Subscription.user_id))).where(Subscription.status != "deleted")
+            select(func.count(distinct(Subscription.user_id)))
+            .join(User, User.telegram_id == Subscription.user_id)
+            .where(
+                Subscription.status != "deleted",
+                User.is_banned == False,
+                User.is_blocked == False,
+            )
         ) or 0
         count_free = max(0, count_all - count_buyers)
 
     text = (
         "📢 <b>سامانه هوشمند ارسال پیام همگانی Zak Univers (AAA)</b>\n\n"
         "لطفاً دسته <b>مخاطبان هدف</b> خود را انتخاب فرمایید:\n\n"
-        f"▫️ 👥 <b>همه کاربران:</b> {count_all:,} نفر\n"
+        f"▫️ 👥 <b>همه کاربران فعال:</b> {count_all:,} نفر\n"
         f"▫️ 💎 <b>فقط مشترکین و خریداران:</b> {count_buyers:,} نفر\n"
         f"▫️ 🎁 <b>فقط کاربران عادی (بدون سرویس):</b> {count_free:,} نفر\n\n"
         "یک گروه را جهت ارسال پیام انتخاب نمایید:"
@@ -311,7 +454,7 @@ async def start_broadcast(callback: types.CallbackQuery, state: FSMContext) -> N
         inline_keyboard=[
             [
                 types.InlineKeyboardButton(
-                    text=f"👥 همه کاربران ({count_all:,} نفر)",
+                    text=f"👥 همه کاربران فعال ({count_all:,} نفر)",
                     callback_data="bcast:tgt:all",
                 )
             ],
@@ -343,7 +486,7 @@ async def on_broadcast_target_chosen(callback: types.CallbackQuery, state: FSMCo
 
     target = callback.data.split(":")[2]
     target_names = {
-        "all": "👥 همه کاربران",
+        "all": "👥 همه کاربران فعال",
         "buyers": "💎 فقط خریداران و مشترکین",
         "free": "🎁 فقط کاربران عادی و بدون سرویس",
     }
@@ -376,9 +519,41 @@ async def on_broadcast_message_received(message: types.Message, state: FSMContex
     if not is_admin(message.from_user.id):
         return
 
+    msg_type = "text"
+    text_content = message.text or message.caption or ""
+    raw_entities = message.entities or message.caption_entities or []
+    entities_data = [e.model_dump() for e in raw_entities]
+    file_id = None
+
+    if message.photo:
+        msg_type = "photo"
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        msg_type = "video"
+        file_id = message.video.file_id
+    elif message.animation:
+        msg_type = "animation"
+        file_id = message.animation.file_id
+    elif message.document:
+        msg_type = "document"
+        file_id = message.document.file_id
+    elif message.voice:
+        msg_type = "voice"
+        file_id = message.voice.file_id
+    elif message.audio:
+        msg_type = "audio"
+        file_id = message.audio.file_id
+    elif message.sticker:
+        msg_type = "sticker"
+        file_id = message.sticker.file_id
+
     await state.update_data(
         content_chat_id=message.chat.id,
         content_msg_id=message.message_id,
+        msg_type=msg_type,
+        text_content=text_content,
+        entities_data=entities_data,
+        file_id=file_id,
         buttons_raw=None,
         is_pin=False,
     )
@@ -419,7 +594,7 @@ async def ask_broadcast_buttons(callback: types.CallbackQuery, state: FSMContext
         "<code>کانال رسمی + https://t.me/zakunivers</code>\n\n"
         "▫️ <b>نمونه چند دکمه در خطوط جداگانه:</b>\n"
         "<code>کانال تلگرام + https://t.me/zakunivers</code>\n"
-        "<code>خرید اشتراک + https://t.me/zakuniversbot</code>\n"
+        "<code>خرید اشتراک + @zakuniversbot</code>\n"
         "<code>پشتیبانی آنلاین + https://t.me/zakaria_support</code>\n\n"
         "▫️ <b>نمونه دو دکمه در یک ردیف (با علامت |):</b>\n"
         "<code>کانال ما + https://t.me/... | پشتیبانی + https://t.me/...</code>"
@@ -446,7 +621,7 @@ async def process_broadcast_buttons_input(message: types.Message, state: FSMCont
     if not kb:
         await message.answer(
             "❌ <b>فرمت دکمه نامعتبر بود!</b>\n\n"
-            "لطفاً مطمئن شوید بین عنوان و لینک علامت <code>+</code> قرار داده‌اید و لینک‌ها با <code>https://</code> یا <code>t.me</code> آغاز می‌شوند.\n"
+            "لطفاً مطمئن شوید بین عنوان و لینک علامت <code>+</code> یا <code>-</code> قرار دارد و لینک‌ها با <code>https://</code> یا <code>@</code> یا <code>t.me</code> آغاز می‌شوند.\n"
             "مجدداً تلاش نمایید:",
             parse_mode="HTML",
             reply_markup=types.InlineKeyboardMarkup(
@@ -476,6 +651,11 @@ async def render_broadcast_preview(bot: Bot, admin_chat_id: int, state: FSMConte
     data = await state.get_data()
     content_chat_id = data.get("content_chat_id")
     content_msg_id = data.get("content_msg_id")
+    msg_type = data.get("msg_type", "text")
+    text_content = data.get("text_content", "")
+    entities_data = data.get("entities_data", [])
+    entities = [types.MessageEntity(**e) for e in entities_data] if entities_data else None
+    file_id = data.get("file_id")
     buttons_raw = data.get("buttons_raw")
     target_title = data.get("target_title", "همه کاربران")
     is_pin = data.get("is_pin", False)
@@ -488,61 +668,100 @@ async def render_broadcast_preview(bot: Bot, admin_chat_id: int, state: FSMConte
         parse_mode="HTML",
     )
 
+    preview_ok = True
+    error_msg = ""
     try:
-        await bot.copy_message(
+        await send_broadcast_message(
+            bot=bot,
             chat_id=admin_chat_id,
-            from_chat_id=content_chat_id,
-            message_id=content_msg_id,
+            content_chat_id=content_chat_id,
+            content_msg_id=content_msg_id,
             reply_markup=reply_markup,
+            msg_type=msg_type,
+            text_content=text_content,
+            file_id=file_id,
+            entities=entities,
         )
     except Exception as exc:
-        logger.warning(f"Could not copy message preview: {exc}")
+        preview_ok = False
+        error_msg = str(exc)
+        logger.warning(f"Could not render broadcast preview: {exc}")
         await bot.send_message(
             chat_id=admin_chat_id,
-            text=f"⚠️ خطا در نمایش پیش‌نمایش: {exc}",
+            text=(
+                f"⚠️ <b>خطا در نمایش پیش‌نمایش:</b>\n<code>{exc}</code>\n\n"
+                "علت معمولاً نامعتبر بودن لینک دکمه‌ها یا عدم دسترسی به پیام مبدأ است."
+            ),
+            parse_mode="HTML",
         )
 
     pin_badge = "🟢 فعال (سنجاق می‌شود)" if is_pin else "🔴 غیرفعال"
     btn_badge = "🟢 متصل شد" if reply_markup else "⚪️ ندارد"
 
-    control_text = (
-        "⚙️ <b>کنترل پنل تایید و ارسال همگانی:</b>\n\n"
-        f"▫️ 🎯 <b>مخاطبان هدف:</b> <b>{target_title}</b>\n"
-        f"▫️ 🔘 <b>دکمه شیشه‌ای:</b> {btn_badge}\n"
-        f"▫️ 📌 <b>سنجاق (Pin) کردن پیام:</b> {pin_badge}\n\n"
-        "⚠️ <i>برای جلوگیری از هرگونه ارسال اشتباهی، پیام تنها با زدن دکمه تایید زیر ارسال می‌شود:</i>"
-    )
+    if preview_ok:
+        control_text = (
+            "⚙️ <b>کنترل پنل تایید و ارسال همگانی:</b>\n\n"
+            f"▫️ 🎯 <b>مخاطبان هدف:</b> <b>{target_title}</b>\n"
+            f"▫️ 🔘 <b>دکمه شیشه‌ای:</b> {btn_badge}\n"
+            f"▫️ 📌 <b>سنجاق (Pin) کردن پیام:</b> {pin_badge}\n\n"
+            "⚠️ <i>برای جلوگیری از هرگونه ارسال اشتباهی، پیام تنها با زدن دکمه تایید زیر ارسال می‌شود:</i>"
+        )
+        pin_btn_text = "📌 پین کردن: 🔴 خاموش" if not is_pin else "📌 پین کردن: 🟢 روشن"
+        control_kb = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="🚀 تایید و شروع ارسال همگانی",
+                        callback_data="bcast:send:confirm",
+                    )
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text=pin_btn_text,
+                        callback_data="bcast:toggle:pin",
+                    ),
+                    types.InlineKeyboardButton(
+                        text="✏️ تنظیم دکمه‌ها",
+                        callback_data="bcast:btn:add",
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text="❌ انصراف و لغو",
+                        callback_data="bcast:cancel",
+                    )
+                ],
+            ]
+        )
+        await state.set_state(AdminBroadcastStates.confirming_broadcast)
+    else:
+        # Pre-flight safety lock: prevent launching a broken broadcast!
+        control_text = (
+            "❌ <b>امکان ارسال این پیام وجود ندارد!</b>\n\n"
+            f"▫️ علت خطا: <code>{error_msg}</code>\n\n"
+            "لطفاً دکمه‌های شیشه‌ای را مجدداً تنظیم کرده یا پیام را دوباره ارسال فرمایید."
+        )
+        control_kb = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="✏️ اصلاح دکمه‌ها",
+                        callback_data="bcast:btn:add",
+                    ),
+                    types.InlineKeyboardButton(
+                        text="⏩ حذف دکمه‌ها (بدون دکمه)",
+                        callback_data="bcast:btn:skip",
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text="❌ انصراف و لغو",
+                        callback_data="bcast:cancel",
+                    )
+                ],
+            ]
+        )
 
-    pin_btn_text = "📌 پین کردن: 🔴 خاموش" if not is_pin else "📌 پین کردن: 🟢 روشن"
-
-    control_kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="🚀 تایید و شروع ارسال همگانی",
-                    callback_data="bcast:send:confirm",
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text=pin_btn_text,
-                    callback_data="bcast:toggle:pin",
-                ),
-                types.InlineKeyboardButton(
-                    text="✏️ تنظیم دکمه‌ها",
-                    callback_data="bcast:btn:add",
-                ),
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text="❌ انصراف و لغو",
-                    callback_data="bcast:cancel",
-                )
-            ],
-        ]
-    )
-
-    await state.set_state(AdminBroadcastStates.confirming_broadcast)
     await bot.send_message(
         chat_id=admin_chat_id,
         text=control_text,
@@ -619,9 +838,14 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
     await state.clear()
 
     target = data.get("target", "all")
-    target_title = data.get("target_title", "همه کاربران")
+    target_title = data.get("target_title", "همه کاربران فعال")
     content_chat_id = data.get("content_chat_id")
     content_msg_id = data.get("content_msg_id")
+    msg_type = data.get("msg_type", "text")
+    text_content = data.get("text_content", "")
+    entities_data = data.get("entities_data", [])
+    entities = [types.MessageEntity(**e) for e in entities_data] if entities_data else None
+    file_id = data.get("file_id")
     buttons_raw = data.get("buttons_raw")
     is_pin = data.get("is_pin", False)
 
@@ -630,7 +854,13 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
     async with AsyncSessionLocal() as session:
         if target == "buyers":
             res = await session.execute(
-                select(distinct(Subscription.user_id)).where(Subscription.status != "deleted")
+                select(distinct(Subscription.user_id))
+                .join(User, User.telegram_id == Subscription.user_id)
+                .where(
+                    Subscription.status != "deleted",
+                    User.is_banned == False,
+                    User.is_blocked == False,
+                )
             )
             target_user_ids = [r[0] for r in res.fetchall() if r[0]]
         elif target == "free":
@@ -638,13 +868,17 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
             res = await session.execute(
                 select(User.telegram_id).where(
                     User.is_banned == False,
+                    User.is_blocked == False,
                     User.telegram_id.not_in(buyers_sub),
                 )
             )
             target_user_ids = [r[0] for r in res.fetchall() if r[0]]
         else:
             res = await session.execute(
-                select(User.telegram_id).where(User.is_banned == False)
+                select(User.telegram_id).where(
+                    User.is_banned == False,
+                    User.is_blocked == False,
+                )
             )
             target_user_ids = [r[0] for r in res.fetchall() if r[0]]
 
@@ -669,18 +903,25 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
     start_ts = time.time()
     sent = 0
     failed = 0
+    blocked_count = 0
+    error_reasons: set[str] = set()
     last_update_ts = time.time()
 
     for idx, uid in enumerate(target_user_ids, 1):
         try:
-            sent_msg = await callback.bot.copy_message(
+            sent_msg = await send_broadcast_message(
+                bot=callback.bot,
                 chat_id=uid,
-                from_chat_id=content_chat_id,
-                message_id=content_msg_id,
+                content_chat_id=content_chat_id,
+                content_msg_id=content_msg_id,
                 reply_markup=reply_markup,
+                msg_type=msg_type,
+                text_content=text_content,
+                file_id=file_id,
+                entities=entities,
             )
             sent += 1
-            if is_pin:
+            if is_pin and sent_msg:
                 try:
                     await callback.bot.pin_chat_message(
                         chat_id=uid,
@@ -693,22 +934,29 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
             logger.warning(f"Broadcast rate limited: waiting {exc.retry_after}s")
             await asyncio.sleep(exc.retry_after + 1)
             try:
-                sent_msg = await callback.bot.copy_message(
+                sent_msg = await send_broadcast_message(
+                    bot=callback.bot,
                     chat_id=uid,
-                    from_chat_id=content_chat_id,
-                    message_id=content_msg_id,
+                    content_chat_id=content_chat_id,
+                    content_msg_id=content_msg_id,
                     reply_markup=reply_markup,
+                    msg_type=msg_type,
+                    text_content=text_content,
+                    file_id=file_id,
+                    entities=entities,
                 )
                 sent += 1
-                if is_pin:
+                if is_pin and sent_msg:
                     try:
                         await callback.bot.pin_chat_message(uid, sent_msg.message_id, both_sides=False)
                     except Exception:
                         pass
-            except Exception:
+            except Exception as exc_after:
                 failed += 1
+                error_reasons.add(str(exc_after))
         except TelegramForbiddenError:
             failed += 1
+            blocked_count += 1
             try:
                 async with AsyncSessionLocal() as s:
                     await s.execute(update(User).where(User.telegram_id == uid).values(is_blocked=True))
@@ -717,7 +965,8 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
                 pass
         except Exception as exc:
             failed += 1
-            logger.debug(f"Broadcast failed for user {uid}: {exc}")
+            error_reasons.add(str(exc))
+            logger.warning(f"Broadcast failed for user {uid}: {exc}")
 
         await asyncio.sleep(0.04)
 
@@ -745,18 +994,32 @@ async def execute_broadcast(callback: types.CallbackQuery, state: FSMContext) ->
     pin_str = "🟢 انجام شد" if is_pin else "⚪️ بدون پین"
     btn_str = "🟢 متصل شد" if reply_markup else "⚪️ بدون دکمه"
 
+    error_summary = ""
+    if error_reasons:
+        reasons_list = [f"• <code>{r}</code>" for r in list(error_reasons)[:3]]
+        error_summary = "\n\n⚠️ <b>دلایل عمده خطاهای رخ‌داده:</b>\n" + "\n".join(reasons_list)
+
+    warning_box = ""
+    if sent == 0 and total_target > 0:
+        warning_box = (
+            "\n\n🚨 <b>هشدار: هیچ پیامی تحویل داده نشد!</b>\n"
+            "احتمالاً دسترسی ربات به پیام مبدأ مسدود شده یا لینک دکمه‌ها معتبر نبوده است."
+        )
+
     report_text = (
         "✅ <b>ارسال پیام همگانی با موفقیت تکمیل گردید!</b>\n\n"
         "📊 <b>گزارش تفصیلی تحویل:</b>\n"
         f"▫️ 🎯 دسته هدف: <b>{target_title}</b>\n"
         f"▫️ 👥 کل مخاطبان: <b>{total_target:,} نفر</b>\n"
         f"▫️ 🟢 تحویل موفق: <b>{sent:,} کاربر</b>\n"
-        f"▫️ 🔴 ناموفق (بلاک/غیرفعال): <b>{failed:,} کاربر</b>\n"
-        f"▫️ 🔘 دکمه شیشه‌ای: <b>{btn_str}</b>\n"
+        f"▫️ 🔴 ناموفق / مسدود: <b>{failed:,} کاربر</b>"
+        + (f" <i>({blocked_count} نفر بلاک جدید شناسایی شد)</i>" if blocked_count > 0 else "")
+        + f"\n▫️ 🔘 دکمه شیشه‌ای: <b>{btn_str}</b>\n"
         f"▫️ 📌 سنجاق (Pin): <b>{pin_str}</b>\n"
         f"▫️ ⏱ مدت زمان ارسال: <b>{elapsed} ثانیه</b>\n"
-        f"▫️ ⚡️ سرعت ارسال: <b>{speed} پیام در ثانیه</b>\n\n"
-        "<i>کلیه کاربران مسدودکننده ربات در پایگاه داده جهت تفکیک آمار بروزرسانی شدند.</i>"
+        f"▫️ ⚡️ سرعت ارسال: <b>{speed} پیام در ثانیه</b>"
+        f"{error_summary}"
+        f"{warning_box}"
     )
 
     markup = types.InlineKeyboardMarkup(
